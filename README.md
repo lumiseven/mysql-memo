@@ -162,3 +162,252 @@
         ```sql
         show status like 'last_query_cost';
         ```
+
+---
+
+## 利用执行计划explain优化sql
+
+在实际开发中，我们往往需要针对某些较为复杂的SQL进行优化，首先我们就需要了解SQL的具体执行情况和过程
+
+1.  什么是explain 如何使用
+explain，即执行计划，是mysql提供的用来模拟优化器执行sql语句的指令，用它我们可以知道sql的执行效果，需要注意的是explain是模拟执行，并不是真正的执行，所以其效果分析并不能完全还原真实的执行效果。
+
+explain指令的用法就是explain+要执行的sql，比如
+
+```sql
+explain select * from gmall.order_info limit 100;
+```
+
+结果显示
+
+![5](./img/5.png)
+
+在 [explain官方文档](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html) 中我们可以知道，explain语句输出的内容中包含下列信息： 
+
+| 列名 | 含义 |
+| -- | -- |
+| id | 语句的唯一标识 |
+| select_type | 查询类型 |
+| table | 表名 |
+| partitions | 分区 |
+| type | 连接类型(left join, right join 等) |
+| possible_keys | 可能会选择的索引 |
+| key | 实际选择的索引 |
+| key_len | 索引的长度 |
+| ref | 索引的哪一列被谁引用了 |
+| rows | 估计要扫描的数据行数 |
+| filtered | 符合查询条件的数据百分比 |
+| Extra | 扩展项 附加信息 没有定值 根据 sql 显示不同的信息 |
+
+2. 输出信息详解
+    1. id 语句的唯一标识
+        sql的序列号，表示sql及子句或者操作表的执行顺序，数字越大的越先执行，数字相同的从上往下依次执行，举例说明，我们执行如下的语句
+        ```sql
+        explain select 
+            * 
+        from 
+            order_info
+        where 
+            user_id in (select id from user_info)
+        ```
+
+        按照我们的正常预期，子查询 `select id from user_info` 肯定是先执行，然后才执行外面的针对 `order` 表的查询，那么我们查看执行计划的结果
+
+        ![6](./img/6.png)
+
+        两个语句的id都是1，但是按照从上往下执行的规则，先执行针对 `order_info` 表的查询，再执行针对 `user_info` 表的查询 并不符合预期
+
+        但从输出可以看到 sql 语句其实已经被优化过，实际执行的语句是:
+        ```sql
+        select `gmall`.`order_info`.`id` AS `id`,
+            `gmall`.`order_info`.`consignee` AS `consignee`,
+            -- ... 省略其中的部分
+        from `gmall`.`user_info`
+            join `gmall`.`order_info`
+        where (
+                `gmall`.`user_info`.`id` = `gmall`.`order_info`.`user_id`
+            )
+        ```
+    
+    2. select_type 查询类型
+        查询类型，用来区分是普通查询还是联合查询或者子查询，从官方文档中我们知道，查询类型分为以下几种：
+        
+        | 查询类型值 |	JSON 名称 |	含义 |
+        | -- | -- | -- |
+        | SIMPLE |	None |	简单查询 不包含 union 或者子查询 |
+        | PRIMARY |	None |	查询中包含任何复杂的子查询，最外层查询则被标记为 Primary |
+        | UNION |	None |	第二个或之后的 select 出现在 union 之后 被标记为 union |
+        | DEPENDENT UNION |	dependent (true) |	第二个或之后的 select 出现在 union 之后 并且外部查询依赖于 union 的结果 |
+        | UNION RESULT |	union_result |	从 union 的临时表中检索结果的 select 语句 |
+        | SUBQUERY |	None |	在 select 或者 where 列表中包含的子查询 |
+        | DEPENDENT SUBQUERY |	dependent (true) |	在 select 或者 where 列表中包含的子查询 并且外部查询依赖select的结果 |
+        | DERIVED |	None |	派生表 |
+        | DEPENDENT DERIVED |	dependent (true) |	依赖于其他表的派生表 |
+        | MATERIALIZED |	materialized_from_subquery |	物化子查询 |
+        | UNCACHEABLE SUBQUERY |	cacheable (false) |	一个子查询，其结果无法缓存，必须为外部查询的每一行重新计算 |
+        | UNCACHEABLE UNION |	cacheable (false) |		UNION 属于不可缓存子查询 的第二个或以后的选择 |
+
+        1. SIMPLE 简单查询，不包含union或者子查询
+            ```sql
+            explain select 
+                * 
+            from 
+                order_info
+            ```
+
+            ![7](./img/7.png)
+
+        2. PRIMARY 最外层的查询
+            ```sql
+            explain select 
+                * 
+            from 
+                (
+                    select id, name from user_info where phone_num like '136%'
+                    UNION 
+                    select id, name from user_info where name like '李%'
+                ) t
+                LEFT JOIN order_info o on o.user_id = t.id
+            ```
+
+            ![8](./img/8.png)
+            
+            可以看到因为有比较复杂的子查询语句，所以最外层针对表o(order 表的别名)的查询类型为PRIMARY。这里还有一个针对表<derived2>的查询被标注为了PRIMARY，这个查询是针对派生表的查询
+        
+        3. UNION
+            第二个及之后的select出现在union之后，被标注为union 
+            我们在上述例子中可以看到，针对user表的第二个查询 `select id,name from user_info where name like '李%'` 被标注为了union，这是因为这个 `select出现在union之后，并且是第三个出现的select` 了
+
+        4. UNION RESULT 从union临时表中检索结果的select
+            从上述的例子中可以看到针对union的临时表<union2,3>的查询，其实也就是查询出来形成我们的表t，这个`针对union临时表的查询被标注为了UNION RESULT`
+        
+        5. DERIVED 派生表
+            表示包含在from子句的子查询中的select 上述例子中的 `select id,name from user_test.user where phone_num like '136%'` 子查询被标注为了DERIVED，这是因为该表是 `在from之后的子查询中的select`
+
+        6. DEPENDENT UNION 在union中的第二个或者之后的查询，并且外部查询依赖于union的结果
+            ```sql
+            explain select 
+                * 
+            from 
+                user_info 
+            where 
+                id IN
+                (
+                    select user_id from order_info where consignee like '136%'
+                    UNION 
+                    select user_id from order_info where order_status = '1005'
+                )
+            ```
+
+            ![9](./img/9.png)
+
+            从执行结果可以看到，子句 `select user_id from order_info where order_status = '1005'` 因为是属于union子句，该union产生的结果与外部查询有直接关系，外部查询的结果依赖于这里union的结果
+        
+        7. subquery 在select或者where列表中包含的子查询
+            ```sql
+            explain select
+                *
+            from 
+                order_info
+            where 
+                total_amount > (select avg(total_amount) from order_info)
+            ```
+
+            可以看到where后的子查询 `select avg(total_amount) from order_info` 被标注为了subquery
+
+            ![10](./img/10.png)
+
+        8. dependent subquery
+            在select或者where列表中包含的子查询，并且外部查询依赖于select的结果 理解了上述的dependent union，再来理解dependent subquery会更好理解一些，实际上在我们的案例6中出现的第一个子句 `select user_id from order_info where consignee like '136%'` 就已经被标注为dependent subquery，这是因为该子查询的结果直接影响了外部查询的结果
+
+        9. UNCACHEABLE SUBQUERY 无法缓存的子查询
+            ```sql
+            explain select
+                *
+            from 
+                order_info
+            where 
+                total_amount > (select avg(total_amount) from order_info where total_amount > @max_connections)
+            ```
+
+            `@max_connections` 是mysql的参数，当语句中使用了mysql参数时，就不会将该结果进行缓存，所以我们可以看到查询子句被标注为了UNCACHEABLE SUBQUERY，当然不是只有使用了mysql参数的语句会被标注为UNCACHEABLE，具体要根据sql语句来分析
+
+            ![11](./img/11.png)
+
+        10. UNCACHEABLE UNION 无法缓存的union
+            ```sql
+            explain select 
+                * 
+            from 
+                (
+                    select user_id from order_info where consignee like '136%'
+                    UNION 
+                    select user_id from order_info where total_amount > @max_connections
+                ) t 
+            ```
+
+            结论同上，@@max_connections是mysql的参数，当语句中使用了mysql参数时，就不会将该结果进行缓存，所以我们可以看到查询子句被标注为了UNCACHEABLE UNION
+
+            ![12](./img/12.png)
+    
+    3. table 表名
+        正在对拿个表进行访问，如果声明了表的别名，就会显示别名。同时也可能是临时表、派生表或者union合并表，如我们上述中的例子所示的 `<union2,3>` ,`<derived2>` 
+
+        派生表：`<derivedN>` 形式，N表示产生派生表的查询的queryId 合并表： `<unionN1,N2>` 形式，N2,N2表示参与union的查询的queryId
+
+    4. partitions 匹配的分区
+        mysql中提供了分区功能，可以将表数据按照一定的规则进行分区，比如按照创建时间进行分区，这样就可以将创建时间久远的数据分到冷数据区，这类数据访问量少，分配的资源就少，创建时间近的分到热数据区，这类数据访问频繁，分配的资源就多，以此实现冷热数据分离，提高查询效率
+
+        所以如果表开启了分区功能的，就会显示该sql涉及到的分区，如果没有开启分区，就会显示为空
+
+    5. type 连接类型
+        连接类型/访问类型，表示该sql是以何种方式访问的数据，比较常见的是全表扫描，就是简单粗暴的将全表便利一遍找到我们想要的数据，这种方式效率非常低下
+
+        所以引入了索引的概念，基于索引，我们将连接类型分为以下几种
+
+        1. system：表中只有一行记录，一般只出现在一些系统表中，业务表很少出现
+        2. const：该表最多有一条匹配的行 在查询开始时被读取。因为只有一行，这一行中的列的值可以被优化器的其他部分视为常数。常数表非常快，因为它们只被读取一次
+            ```sql
+            explain select * from order_info where id=10;
+            ```
+
+            ![13](./img/13.png)
+
+        3. eq_ref：使用唯一索引进行数据查找 当使用的是主键索引或者唯一索引来进行连接使用时就会使用eq_ref
+        4. ref：对于先前表中的每个行组合，从该表中读取具有匹配索引值的所有行。ref如果连接仅使用键的最左前缀或键不是 一个PRIMARY KEY或 UNIQUE索引（换句话说，如果连接不能基于键值选择单行），则使用。如果使用的键只匹配几行，这是一个很好的连接类型。 
+        5. fulltext：使用全文索引进行的数据查找
+        6. ref_or_null：某个字段即需要关联条件，也需要null值的情况
+        7. index_merge：需要多个索引组合使用进行的数据查找
+        8. unique_subquery：利用唯一索引来关联子查询
+        9. index_subquery：利用索引来关联子查询
+        10. range：利用索引查询时限制了范围 适用的操作符：=,like 'xxx%',>,<,>=,<=,between and,is null,or in
+        11. index：全索引扫描 当我们需要的数据在索引中就能查找到，或者需要用到索引进行排序时其连接类型就是index
+        12. ALL：全表扫描 
+        
+        * 以上访问类型的效率从高到低依次是： system > const > eq_ref > ref > fulltext > ref_or_null > index_merge > unique_subquery > index_subquery > range > index > ALL
+    
+    6. possible_keys 可能会选择的索引
+        显示可能会在这张表中使用的索引，查询中涉及到的列如果是索引列则可能会被列出显示出来，但不一定在查询中实际使用
+    
+    7. key 实际选择的索引
+        查询中实际使用的索引
+    
+    8. key_len 索引的长度
+        索引中使用的字节数
+
+    9. ref 索引的哪一列被引用了
+
+    10. rows 估计要扫描的数据行数
+        这时个预估值，非常重要的参数，我们可以通过该参考了解到sql执行需要查找多个行数据，只要能查找我们想要的结果，该值越少越好
+
+    11. filtered 符合查询条件的数据百分比
+        符合查询条件的数据百分比
+
+    12. extra 拓展信息
+
+3. 执行计划并不是一定是最佳
+有时候mysql选择的执行计划并不一定是最佳的，所以执行计划的结果仅仅是个优化的参考值而不是一定值。执行计划的选择受以下因素的影响：
+    1. 统计信息不准确，因为innodb采用MVCC机制（多版本并发控制），导致查询的数据并不一定是实际数据，于是执行计划预估的成本不等于实际成本 
+    2. mysql的优化基于成本模型的优化，所以并不一定是最快的优化 
+    3. mysql不会考虑其他并发执行的查询，但是实际执行是会有并发的 
+    4. mysql不考虑不受控制的操作成本，如存储过程或者用户自定义函数的成本
