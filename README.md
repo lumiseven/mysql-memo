@@ -144,21 +144,21 @@
         SELECT event_id,event_name,source,timer_wait,object_name,index_name,operation,nesting_event_id FROM events_waits_history_long WHERE nesting_event_id = 1553;
         ```
     
-    4. 其他监控指令
-        1. show processlist 监控连接线程数
-            show processlist指令可以查询到mysql当前的连接线程，以此来监控mysql是否有大量线程数连接，从而进行排查
-            
-            ```sql
-            show processlist
-            ```
+3. 其他常用监控指令
+    1. show processlist 监控连接线程数
+        show processlist指令可以查询到mysql当前的连接线程，以此来监控mysql是否有大量线程数连接，从而进行排查
+        
+        ```sql
+        show processlist
+        ```
 
-            执行结果
+        执行结果
 
-            ![4](./img/4.png)
+        ![4](./img/4.png)
 
-        2. last_query_cost 监控数据页
-            mysql中是以数据页为单位来存储数据的，last_query_cost指令用于查询最近一次查询需要查找多少个数据页。查找的数据页越多，IO越高，性能越差
+    2. last_query_cost 监控数据页
+        mysql中是以数据页为单位来存储数据的，last_query_cost指令用于查询最近一次查询需要查找多少个数据页。查找的数据页越多，IO越高，性能越差
 
-            ```sql
-            show status like 'last_query_cost';
-            ```
+        ```sql
+        show status like 'last_query_cost';
+        ```
